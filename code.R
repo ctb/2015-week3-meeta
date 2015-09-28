@@ -1,10 +1,12 @@
 source("http://bioconductor.org/biocLite.R")
+install.packages('gplots')
 biocLite('edgeR')
 biocLite('DESeq2')
 
 library(edgeR)
 library(DESeq2)
 library(limma)
+library(gplots)
 
 # Load data from eset from ReCount
 load('bottomly_eset.RData')
@@ -170,8 +172,45 @@ voom_results <- topTable(fit.voom, coef=2,  adjust="BH", number = nrow(exprs(bot
 voom_results$threshold <- as.logical(voom_results$adj.P.Val < p.threshold)
 genes.voom <- row.names(voom_results)[which(voom_results$threshold)]
 
-install.packages('gplots')
-
-library(gplots)
 venn(list(edgeR = genes.edgeR, DESeq2 = genes.deseq, voom = genes.voom))
 
+
+#####
+
+## edgeR ##
+# Design matrix
+design.mat <- model.matrix(~ 0 + dge$samples$group)
+colnames(design.mat) <- c("C57BL", "DBA")
+
+# Model fitting
+fit.edgeR <- glmFit(dge2, design.mat)
+
+# Differential expression
+contrasts.edgeR <- makeContrasts(C57BL - DBA, levels=design.mat)
+lrt.edgeR <- glmLRT(fit.edgeR, contrast=contrasts.edgeR)
+
+# Access results tables
+edgeR_results <- lrt.edgeR$table
+sig.edgeR <- decideTestsDGE(lrt.edgeR, adjust.method="BH", p.value = p.threshold)
+genes.edgeR <- row.names(edgeR_results)[which(sig.edgeR == 1)]
+
+## DESeq2 ##
+contrast.deseq2 <- list("strainC57BL.6J", "strainDBA.2J")
+deseq2_results <- results(dds2, contrast=contrast.deseq2)
+deseq2_results$threshold <- as.logical(deseq2_results$padj < p.threshold)
+genes.deseq <- row.names(deseq2_results)[which(deseq2_results$threshold)]
+
+## voom-limma ##
+# Create design matrix
+design <- model.matrix(~ pData(bottomly.2reps)$strain)
+
+# Usual limma pipeline
+fit.voom <- lmFit(v.2reps, design)
+fit.voom <- eBayes(fit.voom)
+
+voom_results <- topTable(fit.voom, coef=2,  adjust="BH", number = nrow(exprs(bottomly.eset)))
+voom_results$threshold <- as.logical(voom_results$adj.P.Val < p.threshold)
+genes.voom <- row.names(voom_results)[which(voom_results$threshold)]
+
+
+venn(list(edgeR = genes.edgeR, DESeq2 = genes.deseq, voom = genes.voom))
