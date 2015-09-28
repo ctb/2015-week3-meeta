@@ -1,12 +1,18 @@
-source("http://bioconductor.org/biocLite.R")
 install.packages('gplots')
 biocLite('edgeR')
 biocLite('DESeq2')
 
+source("http://bioconductor.org/biocLite.R")
 library(edgeR)
 library(DESeq2)
 library(limma)
 library(gplots)
+library(Biobase)
+
+# ReCount data: http://bowtie-bio.sourceforge.net/recount/
+# ReCount paper: http://www.biomedcentral.com/1471-2105/12/449
+# Bottomly et al. data set: http://journals.plos.org/plosone/article?id=10.1371/journal.pone.0017820
+# (mouse)
 
 # Load data from eset from ReCount
 load('bottomly_eset.RData')
@@ -58,6 +64,10 @@ mean.vec <- apply(cpm.mat, 1, mean)
 sdvec <- apply(cpm.mat, 1, sd)
 plot(mean.vec, sdvec, pch=".", main="10 replicates", ylab="sd", xlab="Average logCPM")
 
+#
+# DEseq2
+#
+
 # Create DESeq2 datasets
 dds <- DESeqDataSetFromMatrix(countData = exprs(bottomly.eset), colData = pData(bottomly.eset), design = ~ strain )
 dds <- DESeq(dds)
@@ -70,10 +80,13 @@ dds.2rep <- DESeq(dds.2rep)
 
 
 # Plot dispersion estimates
-plotDispEsts(dds)
-plotDispEsts(dds.5rep)
 plotDispEsts(dds.2rep)
+plotDispEsts(dds.5rep)
+plotDispEsts(dds)
 
+#
+# edgeR
+#
 
 dge <- DGEList(counts=exprs(bottomly.eset), group=pData(bottomly.eset)$strain)
 # Normalize by total count
@@ -109,17 +122,21 @@ dge.2reps <- estimateGLMTrendedDisp(dge.2reps, design.mat, method="power")
 dge.2reps<- estimateGLMTagwiseDisp(dge.2reps,design.mat)
 
 # Plot mean-variance
-plotBCV(dge)
-plotBCV(dge.5reps)
 plotBCV(dge.2reps)
+plotBCV(dge.5reps)
+plotBCV(dge)
 
+#
+# limma/voom
+#
 
-# Create design matrix
-design <- model.matrix(~ pData(bottomly.eset)$strain)
+# Create design matrix for 2 replicates data set
+design <- model.matrix(~ pData(bottomly.2reps)$strain)
 
-# Apply voom transformation
-nf <- calcNormFactors(bottomly.eset)
-v <- voom(exprs(bottomly.eset), design, lib.size=colSums(exprs(bottomly.eset))*nf, normalize.method="quantile", plot=TRUE)
+# apply voom transformation & plot
+nf <- calcNormFactors(bottomly.2reps)
+v.2reps <- voom(exprs(bottomly.2reps), design, lib.size=colSums(exprs(bottomly.2reps))*nf, 
+                normalize.method="quantile", plot=TRUE)
 
 # Do same for 5 replicate dataset
 design <- model.matrix(~ pData(bottomly.5reps)$strain)
@@ -127,13 +144,92 @@ nf <- calcNormFactors(bottomly.5reps)
 v.5reps <- voom(exprs(bottomly.5reps), design, lib.size=colSums(exprs(bottomly.5reps))*nf, 
                 normalize.method="quantile", plot=TRUE)
 
-# Do same for 2 replicates dataset
-design <- model.matrix(~ pData(bottomly.2reps)$strain)
-nf <- calcNormFactors(bottomly.2reps)
-v.2reps <- voom(exprs(bottomly.2reps), design, lib.size=colSums(exprs(bottomly.2reps))*nf, 
-                normalize.method="quantile", plot=TRUE)
+# Same, for all data.
+design <- model.matrix(~ pData(bottomly.eset)$strain)
+nf <- calcNormFactors(bottomly.eset)
+v <- voom(exprs(bottomly.eset), design, lib.size=colSums(exprs(bottomly.eset))*nf, normalize.method="quantile", plot=TRUE)
 
-#####
+##### Now, let's calculate differentially expressed genes for 2 repl at p 0.05
+
+p.threshold <- 0.05
+
+## edgeR ##
+# Design matrix
+design.mat <- model.matrix(~ 0 + dge.2reps$samples$group)
+colnames(design.mat) <- c("C57BL", "DBA")
+
+# Model fitting
+fit.edgeR <- glmFit(dge.2reps, design.mat)
+
+# Differential expression
+contrasts.edgeR <- makeContrasts(C57BL - DBA, levels=design.mat)
+lrt.edgeR <- glmLRT(fit.edgeR, contrast=contrasts.edgeR)
+
+# Access results tables
+edgeR_results <- lrt.edgeR$table
+sig.edgeR <- decideTestsDGE(lrt.edgeR, adjust.method="BH", p.value = p.threshold)
+genes.edgeR <- row.names(edgeR_results)[which(sig.edgeR == 1)]
+
+## DESeq2 ##
+contrast.deseq2 <- list("strainC57BL.6J", "strainDBA.2J")
+deseq2_results <- results(dds, contrast=contrast.deseq2)
+deseq2_results$threshold <- as.logical(deseq2_results$padj < p.threshold)
+genes.deseq <- row.names(deseq2_results)[which(deseq2_results$threshold)]
+
+## voom-limma ##
+design <- model.matrix(~ pData(bottomly.2reps)$strain)
+fit.voom <- lmFit(v.2reps, design)
+fit.voom <- eBayes(fit.voom)
+
+voom_results <- topTable(fit.voom, coef=2,  adjust="BH", number = nrow(exprs(bottomly.eset)))
+voom_results$threshold <- as.logical(voom_results$adj.P.Val < p.threshold)
+genes.voom <- row.names(voom_results)[which(voom_results$threshold)]
+
+# now, look at overlap
+
+venn(list(edgeR = genes.edgeR, DESeq2 = genes.deseq, voom = genes.voom))
+
+##### Now, let's calculate differentially expressed genes for 5 repl at p 0.05
+
+p.threshold <- 0.05
+
+## edgeR ##
+# Design matrix
+design.mat <- model.matrix(~ 0 + dge.5reps$samples$group)
+colnames(design.mat) <- c("C57BL", "DBA")
+
+# Model fitting
+fit.edgeR <- glmFit(dge.5reps, design.mat)
+
+# Differential expression
+contrasts.edgeR <- makeContrasts(C57BL - DBA, levels=design.mat)
+lrt.edgeR <- glmLRT(fit.edgeR, contrast=contrasts.edgeR)
+
+# Access results tables
+edgeR_results <- lrt.edgeR$table
+sig.edgeR <- decideTestsDGE(lrt.edgeR, adjust.method="BH", p.value = p.threshold)
+genes.edgeR <- row.names(edgeR_results)[which(sig.edgeR == 1)]
+
+## DESeq2 ##
+contrast.deseq2 <- list("strainC57BL.6J", "strainDBA.2J")
+deseq2_results <- results(dds.5rep, contrast=contrast.deseq2)
+deseq2_results$threshold <- as.logical(deseq2_results$padj < p.threshold)
+genes.deseq <- row.names(deseq2_results)[which(deseq2_results$threshold)]
+
+## voom-limma ##
+design <- model.matrix(~ pData(bottomly.5reps)$strain)
+fit.voom <- lmFit(v.5reps, design)
+fit.voom <- eBayes(fit.voom)
+
+voom_results <- topTable(fit.voom, coef=2,  adjust="BH", number = nrow(exprs(bottomly.eset)))
+voom_results$threshold <- as.logical(voom_results$adj.P.Val < p.threshold)
+genes.voom <- row.names(voom_results)[which(voom_results$threshold)]
+
+# now, look at overlap
+
+venn(list(edgeR = genes.edgeR, DESeq2 = genes.deseq, voom = genes.voom))
+
+##### Finally, let's calculate differentially expressed genes for all repl at p 0.05
 
 p.threshold <- 0.05
 
@@ -161,10 +257,7 @@ deseq2_results$threshold <- as.logical(deseq2_results$padj < p.threshold)
 genes.deseq <- row.names(deseq2_results)[which(deseq2_results$threshold)]
 
 ## voom-limma ##
-# Create design matrix
 design <- model.matrix(~ pData(bottomly.eset)$strain)
-
-# Usual limma pipeline
 fit.voom <- lmFit(v, design)
 fit.voom <- eBayes(fit.voom)
 
@@ -172,45 +265,7 @@ voom_results <- topTable(fit.voom, coef=2,  adjust="BH", number = nrow(exprs(bot
 voom_results$threshold <- as.logical(voom_results$adj.P.Val < p.threshold)
 genes.voom <- row.names(voom_results)[which(voom_results$threshold)]
 
-venn(list(edgeR = genes.edgeR, DESeq2 = genes.deseq, voom = genes.voom))
-
-
-#####
-
-## edgeR ##
-# Design matrix
-design.mat <- model.matrix(~ 0 + dge$samples$group)
-colnames(design.mat) <- c("C57BL", "DBA")
-
-# Model fitting
-fit.edgeR <- glmFit(dge2, design.mat)
-
-# Differential expression
-contrasts.edgeR <- makeContrasts(C57BL - DBA, levels=design.mat)
-lrt.edgeR <- glmLRT(fit.edgeR, contrast=contrasts.edgeR)
-
-# Access results tables
-edgeR_results <- lrt.edgeR$table
-sig.edgeR <- decideTestsDGE(lrt.edgeR, adjust.method="BH", p.value = p.threshold)
-genes.edgeR <- row.names(edgeR_results)[which(sig.edgeR == 1)]
-
-## DESeq2 ##
-contrast.deseq2 <- list("strainC57BL.6J", "strainDBA.2J")
-deseq2_results <- results(dds2, contrast=contrast.deseq2)
-deseq2_results$threshold <- as.logical(deseq2_results$padj < p.threshold)
-genes.deseq <- row.names(deseq2_results)[which(deseq2_results$threshold)]
-
-## voom-limma ##
-# Create design matrix
-design <- model.matrix(~ pData(bottomly.2reps)$strain)
-
-# Usual limma pipeline
-fit.voom <- lmFit(v.2reps, design)
-fit.voom <- eBayes(fit.voom)
-
-voom_results <- topTable(fit.voom, coef=2,  adjust="BH", number = nrow(exprs(bottomly.eset)))
-voom_results$threshold <- as.logical(voom_results$adj.P.Val < p.threshold)
-genes.voom <- row.names(voom_results)[which(voom_results$threshold)]
-
+# now, look at overlap
 
 venn(list(edgeR = genes.edgeR, DESeq2 = genes.deseq, voom = genes.voom))
+
